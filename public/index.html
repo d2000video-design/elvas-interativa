@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#060b14">
+<title>Elvas Interativa</title>
+<style>
+  *{box-sizing:border-box}
+  html{background:#060b14;scroll-behavior:auto}
+  body{margin:0;background:#060b14;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+  #viewer{width:min(100%,540px);margin:0 auto;background:#060b14}
+  .page{
+    position:relative;
+    width:100%;
+    background:#060b14;
+    line-height:0;
+    overflow:hidden;
+  }
+  .page canvas{display:block;width:100%;height:100%}
+  .link-layer{position:absolute;inset:0;pointer-events:none}
+  .hit{
+    position:absolute;display:block;pointer-events:auto;
+    background:transparent;border:0;padding:0;margin:0;
+    cursor:pointer;touch-action:manipulation;
+    -webkit-tap-highlight-color:rgba(255,255,255,.10)
+  }
+  #loading{
+    position:fixed;z-index:50;left:50%;top:50%;transform:translate(-50%,-50%);
+    background:rgba(8,15,27,.88);color:#fff;border-radius:999px;
+    padding:10px 14px;font-size:13px;line-height:1.2;
+    backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)
+  }
+  #error{
+    display:none;position:fixed;z-index:60;left:50%;top:50%;transform:translate(-50%,-50%);
+    width:min(86vw,420px);padding:16px;border-radius:14px;background:#111827;color:#fff;
+    font-size:14px;line-height:1.4;text-align:center
+  }
+  @media(min-width:541px){#viewer{box-shadow:0 0 60px rgba(0,0,0,.35)}}
+</style>
+</head>
+<body>
+<div id="viewer"></div>
+<div id="loading">A carregar…</div>
+<div id="error"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+(async()=>{
+  const PDF_URL="/Elvas_Interativa.pdf";
+  const MAP_URL="/links.json";
+  const viewer=document.getElementById("viewer");
+  const loading=document.getElementById("loading");
+  const errorBox=document.getElementById("error");
+  let pdf=null, linkMap=null, pageRatios=[];
+  const rendered=new Set(), rendering=new Set();
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc=
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+  function fail(msg){
+    loading.style.display="none";
+    errorBox.textContent=msg;
+    errorBox.style.display="block";
+  }
+
+  function gotoPage(n){
+    const el=document.getElementById("page-"+n);
+    if(!el)return;
+    // Render target immediately, then jump to it.
+    renderPage(n);
+    el.scrollIntoView({behavior:"auto",block:"start"});
+    history.replaceState(null,"","#page="+n);
+  }
+
+  function addLinks(pageNo, container){
+    const data=linkMap.pages[pageNo-1];
+    const layer=document.createElement("div");
+    layer.className="link-layer";
+
+    for(const l of data.links){
+      const a=document.createElement("a");
+      a.className="hit";
+      a.style.left=(l.x*100)+"%";
+      a.style.top=(l.y*100)+"%";
+      a.style.width=(l.w*100)+"%";
+      a.style.height=(l.h*100)+"%";
+      a.setAttribute("aria-label","Abrir");
+
+      if(l.type==="url"){
+        a.href=l.url;
+        a.target="_blank";
+        a.rel="noopener noreferrer";
+      }else{
+        a.href="#page="+l.target;
+        a.addEventListener("click",(e)=>{
+          e.preventDefault();
+          e.stopPropagation();
+          gotoPage(l.target);
+        });
+      }
+      layer.appendChild(a);
+    }
+    container.appendChild(layer);
+  }
+
+  async function renderPage(pageNo){
+    if(rendered.has(pageNo)||rendering.has(pageNo))return;
+    rendering.add(pageNo);
+    try{
+      const page=await pdf.getPage(pageNo);
+      const holder=document.getElementById("page-"+pageNo);
+      if(!holder)return;
+
+      const cssWidth=holder.clientWidth || Math.min(window.innerWidth,540);
+      const base=page.getViewport({scale:1});
+      const scale=cssWidth/base.width;
+      const viewport=page.getViewport({scale});
+      const dpr=Math.min(window.devicePixelRatio||1,2);
+
+      const canvas=document.createElement("canvas");
+      canvas.width=Math.floor(viewport.width*dpr);
+      canvas.height=Math.floor(viewport.height*dpr);
+      canvas.style.width="100%";
+      canvas.style.height="100%";
+      const ctx=canvas.getContext("2d",{alpha:false});
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+
+      holder.innerHTML="";
+      holder.appendChild(canvas);
+      addLinks(pageNo,holder);
+
+      await page.render({canvasContext:ctx,viewport,background:"#060b14"}).promise;
+      rendered.add(pageNo);
+    }catch(e){
+      console.error("Page render",pageNo,e);
+    }finally{
+      rendering.delete(pageNo);
+    }
+  }
+
+  try{
+    const [pdfTask,mapResp]=await Promise.all([
+      pdfjsLib.getDocument({url:PDF_URL,useSystemFonts:true}).promise,
+      fetch(MAP_URL,{cache:"no-store"})
+    ]);
+    pdf=pdfTask;
+    linkMap=await mapResp.json();
+
+    // Build all 131 page placeholders first, so native vertical scrolling works immediately.
+    for(let i=1;i<=pdf.numPages;i++){
+      const meta=linkMap.pages[i-1];
+      const holder=document.createElement("section");
+      holder.className="page";
+      holder.id="page-"+i;
+      holder.style.aspectRatio=meta.width+" / "+meta.height;
+      viewer.appendChild(holder);
+    }
+
+    // Lazy render visible and nearby pages, keeping old Android devices responsive.
+    const observer=new IntersectionObserver((entries)=>{
+      for(const entry of entries){
+        if(entry.isIntersecting){
+          const n=parseInt(entry.target.id.replace("page-",""),10);
+          renderPage(n);
+          if(n>1)renderPage(n-1);
+          if(n<pdf.numPages)renderPage(n+1);
+        }
+      }
+    },{rootMargin:"120% 0px 120% 0px",threshold:0.01});
+
+    document.querySelectorAll(".page").forEach(el=>observer.observe(el));
+
+    const m=location.hash.match(/page=(\d+)/i);
+    const initial=m?Math.max(1,Math.min(pdf.numPages,parseInt(m[1],10))):1;
+    await renderPage(initial);
+    gotoPage(initial);
+    loading.style.display="none";
+  }catch(e){
+    console.error(e);
+    fail("Não foi possível carregar o Elvas Interativa. Atualize a página e tente novamente.");
+  }
+})();
+</script>
+</body>
+</html>
